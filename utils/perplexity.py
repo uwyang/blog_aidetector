@@ -56,7 +56,8 @@ def results_to_df(results):
     columns = ['i', 'current_token', 'actual_next_token', 
            'logit_mean', 'logit_std', 
            'prob_mean', 'prob_std', 'log_prob_mean', 'log_prob_std', 
-           'actual_next_token_logit', 'actual_next_token_prob', 'actual_next_token_log_prob_z_score', 'actual_next_token_rank']
+           'actual_next_token_logit', 'actual_next_token_prob', 'actual_next_token_log_prob_z_score', 
+           'actual_next_token_prob_z_score', 'actual_next_token_logit_z_score', 'actual_next_token_rank']
 
     results_df = pd.DataFrame(results, columns=columns)
     return results_df
@@ -135,6 +136,8 @@ def get_sequential_predictions_stats(text, max_tokens = 512):
         actual_next_token_logit = last_token_logits[actual_next_token_id].item()
         actual_next_token_prob = probs[actual_next_token_id].item()
         actual_next_token_log_prob_z_score = (log_probs[actual_next_token_id].item() - log_prob_mean) / log_prob_std
+        actual_next_token_prob_z_score = (probs[actual_next_token_id].item() - prob_mean) / prob_std
+        actual_next_token_logit_z_score = (last_token_logits[actual_next_token_id].item() - logit_mean) / logit_std
         actual_next_token_rank = (last_token_logits > actual_next_token_logit).sum().item() + 1
         
         # Print statistics and predictions
@@ -144,5 +147,6 @@ def get_sequential_predictions_stats(text, max_tokens = 512):
                         logit_mean, logit_std, \
                         prob_mean, prob_std, log_prob_mean, log_prob_std, \
                         actual_next_token_logit, actual_next_token_prob, \
-                        actual_next_token_log_prob_z_score, actual_next_token_rank])
+                        actual_next_token_log_prob_z_score, \
+                        actual_next_token_prob_z_score, actual_next_token_logit_z_score, actual_next_token_rank])
     return results
