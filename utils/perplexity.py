@@ -7,10 +7,12 @@ import numpy as np
 
 # Load the tokenizer and model
 model_name="distilgpt2"
-perplexity_tokenizer = AutoTokenizer.from_pretrained(model_name)
-perplexity_model = AutoModelForCausalLM.from_pretrained(model_name)
+#perplexity_tokenizer = AutoTokenizer.from_pretrained(model_name)
+#perplexity_model = AutoModelForCausalLM.from_pretrained(model_name)
 
-def calculate_perplexity(text):
+
+
+def calculate_perplexity(text, model_name = model_name):
     """
     Calculate the perplexity of a given text using a specified language model.
     Perplexity is a measure of how well a probability model predicts a sample.
@@ -25,6 +27,10 @@ def calculate_perplexity(text):
         perplexity = calculate_perplexity(text)
         print(f"Perplexity: {perplexity}")
     """
+    #reset model to re-initialize the state. 
+    perplexity_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    perplexity_model = AutoModelForCausalLM.from_pretrained(model_name)
+
 
     inputs = perplexity_tokenizer(text, return_tensors="pt")
     
@@ -52,6 +58,17 @@ def calculate_cumulative_perplexity(probabilities, epsilon=1e-9):
 
     return cumulative_perplexities
 
+
+def calculate_windowed_perplexity(probabilities, epsilon=1e-9, window=10):
+
+    problog = [np.log(prob + epsilon) for prob in probabilities]
+    meanproblog = [np.mean(problog[max(0, i - window):i]) for i in range(1, len(problog) + 1)]
+    perplexities = [np.exp(-logprob) for logprob in meanproblog]
+
+    return perplexities
+
+
+
 def results_to_df(results):
     columns = ['i', 'current_token', 'actual_next_token', 
            'logit_mean', 'logit_std', 
@@ -63,7 +80,7 @@ def results_to_df(results):
     return results_df
 
 
-def get_sequential_predictions_stats(text, max_tokens = 512):
+def get_sequential_predictions_stats(text, max_tokens = 512, model_name = model_name):
     """
     Generate sequential prediction statistics for a given text using a pre-trained language model.
     Args:
@@ -83,9 +100,11 @@ def get_sequential_predictions_stats(text, max_tokens = 512):
             - float: The logit value for the actual next token.
             - float: The probability value for the actual next token.
     """
-    # Load model and tokenizer
-    tokenizer = perplexity_tokenizer
-    model = perplexity_model
+    # Load model and tokenizer, reset all parameters
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+
+
     # Initial tokenization of the input text
     tokens = tokenizer.tokenize(text)
     
