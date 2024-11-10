@@ -12,7 +12,7 @@ model_name="distilgpt2"
 
 
 
-def calculate_perplexity(text, model_name = model_name):
+def calculate_perplexity(text, model, tokenizer):
     """
     Calculate the perplexity of a given text using a specified language model.
     Perplexity is a measure of how well a probability model predicts a sample.
@@ -28,8 +28,10 @@ def calculate_perplexity(text, model_name = model_name):
         print(f"Perplexity: {perplexity}")
     """
     #reset model to re-initialize the state. 
-    perplexity_tokenizer = AutoTokenizer.from_pretrained(model_name)
-    perplexity_model = AutoModelForCausalLM.from_pretrained(model_name)
+    #perplexity_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    #perplexity_model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
+    perplexity_tokenizer = model
+    perplexity_model = tokenizer
 
 
     inputs = perplexity_tokenizer(text, return_tensors="pt")
@@ -79,93 +81,170 @@ def results_to_df(results):
     results_df = pd.DataFrame(results, columns=columns)
     return results_df
 
+def evaluate(model, input_ids):
+    # Get model outputs for the current input
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, labels=input_ids)
+    
+    #loss of the model: 
+    loss = outputs.loss.item()
 
-def get_sequential_predictions_stats(text, max_tokens = 512, model_name = model_name):
+    # Logits from the model
+    logits = outputs.logits  # Shape: (batch_size, sequence_length, vocab_size)
+
+    return loss, logits
+
+
+def get_eval_results(text,  model, tokenizer,max_tokens = 512):
     """
     Generate sequential prediction statistics for a given text using a pre-trained language model.
     Args:
         text (str): The input text for which to generate prediction statistics.
         max_tokens (int, optional): The maximum number of tokens to consider from the input text. Defaults to 512.
     Returns:
-        list: A list of lists where each inner list contains the following statistics for each token in the input text:
-            - int: The index of the current token.
-            - str: The current token.
-            - str: The actual next token.
-            - float: The mean of the logits for the next token prediction.
-            - float: The standard deviation of the logits for the next token prediction.
-            - float: The mean of the probabilities for the next token prediction.
-            - float: The standard deviation of the probabilities for the next token prediction.
-            - float: The mean of the log probabilities for the next token prediction.
-            - float: The standard deviation of the log probabilities for the next token prediction.
-            - float: The logit value for the actual next token.
-            - float: The probability value for the actual next token.
+
     """
     # Load model and tokenizer, reset all parameters
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    #tokenizer = AutoTokenizer.from_pretrained(model_name)
+    #model = AutoModelForCausalLM.from_pretrained(model_name, **kwargs)
 
 
     # Initial tokenization of the input text
     tokens = tokenizer.tokenize(text)
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"]
     
     if max_tokens is not None:
         tokens = tokens[:max_tokens]
+        input_ids = input_ids[:, :max_tokens]
     
-    #print(f"Initial text: '{text}'\n")
     
-    results = []
-    # Step through each token in the initial text (except the last token since it has no "next" token)
-    
-
-    # Reconstruct the sequence up to the current token
-    all_tokens = tokenizer.convert_tokens_to_string(tokens)
-    input_ids = tokenizer(all_tokens, return_tensors="pt")["input_ids"]
 
     # Get model outputs for the current input
-    with torch.no_grad():
-        outputs = model(input_ids=input_ids, labels=input_ids)
+    loss, logits = evaluate(model, input_ids)
+    return logits, tokens, input_ids, loss
+
+def get_sequential_predictions_statsdf(logits, tokens, input_ids, tokenizer):
+    # Reshape logits for cross-entropy calculation
+    batch_size, sequence_length, vocab_size = logits.size()
+    # Calculate per-token cross-entropy loss
+    loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+    per_token_loss = loss_fn(logits.view(-1, vocab_size), input_ids.view(-1))
+
+    per_token_loss = per_token_loss.view(sequence_length)
+    # Apply softmax to convert logits to probabilities
+    probs = F.softmax(logits, dim=-1)  # Shape: (batch_size, sequence_length, vocab_size)
 
 
-    for i in range(len(tokens) - 1):
 
-        # Get logits for the last token (next word prediction)
-        last_token_logits = outputs.logits[0, i, :]  # Shape: (vocab_size,)
 
-        # Calculate mean and std of logits
-        logit_mean = last_token_logits.mean().item()
-        logit_std = last_token_logits.std().item()
 
-        # Calculate probabilities
-        probs = F.softmax(last_token_logits, dim=-1)
+    # Shift input_ids to get the actual next token at each position
+    next_tokens = input_ids[:, 1:]  # Drop the first token for next-token prediction
+    pred_probs = probs[:, :-1, :]  # Align with next tokens, ignore last position
 
-        # Calculate mean and std of probabilities
-        prob_mean = probs.mean().item()
-        prob_std = probs.std().item()
+    # Gather the probabilities of the actual next tokens
+    next_token_probs = torch.gather(pred_probs, -1, next_tokens.unsqueeze(-1)).squeeze(-1)
+    # Calculate the rank of the actual next token in the predicted probabilities
+    next_token_ranks = torch.argsort(pred_probs, dim=-1, descending=True)
+    next_token_rank = (next_token_ranks == next_tokens.unsqueeze(-1)).nonzero(as_tuple=True)[-1]
+    # Calculate mean logits for each token
+    actual_next_token_logits = torch.gather(logits[:, :-1, :], -1, next_tokens.unsqueeze(-1)).squeeze(-1)
+
+
+    # Calculate z-scores for logits
+    logit_mean = logits.mean(dim=-1, keepdim=True)
+    logit_std = logits.std(dim=-1, keepdim=True)
+    #logit_z_scores = (logits - logit_mean) / (logit_std + 1e-9)  # Add epsilon to avoid division by zero
+    # Drop the last item in logit_mean to line up with actual_next_token_logits
+    actual_next_token_logit_z_scores = (actual_next_token_logits.squeeze() - logit_mean.squeeze()[:-1]) / (logit_std.squeeze()[:-1] + 1e-9)
+
+    # Calculate z-scores for probabilities
+    prob_mean = probs.mean(dim=-1, keepdim=True)
+    prob_std = probs.std(dim=-1, keepdim=True)
+    actual_next_token_probs = torch.gather(probs[:, :-1, :], -1, next_tokens.unsqueeze(-1)).squeeze(-1)
+    #prob_z_scores = (probs - prob_mean) / (prob_std + 1e-9)  # Add epsilon to avoid division by zero
+    # Calculate z-scores for actual next token probabilities
+    actual_next_token_prob_z_scores = (actual_next_token_probs - prob_mean.squeeze()[:-1]) / (prob_std.squeeze()[:-1] + 1e-9)
+
+    # Calculate the most probable next token and its probability
+    most_probable_next_token_id = torch.argmax(pred_probs, dim=-1).squeeze().tolist()
+    most_probable_next_token_prob = torch.max(pred_probs, dim=-1).values.squeeze().tolist()
+    most_probable_next_token = tokenizer.convert_ids_to_tokens(most_probable_next_token_id)
+
+
+    # Define a function to convert a tensor or list to a padded 1D numpy array
+    # padding with last element. 
+    def to_padded_numpy_array(var, target_length):
+        if isinstance(var, torch.Tensor):
+            var = var.cpu().numpy().flatten()  # Convert to 1D numpy array
+        elif isinstance(var, list):
+            var = np.array(var).flatten()  # Convert to 1D numpy array if it's a list
         
-        # Calculate log probabilities
-        log_probs = torch.log(probs + 1e-9)  # Adding a small value to avoid log(0)
-        
-        # Calculate mean and std of log probabilities
-        log_prob_mean = log_probs.mean().item()
-        log_prob_std = log_probs.std().item()
+        if len(var) < target_length:
+            # Pad with the last element to reach target_length
+            var = np.pad(var, (0, target_length - len(var)), 'edge')
+        return var
 
-        # The actual next token
-        actual_next_token = tokens[i+1]
-        actual_next_token_id = tokenizer.convert_tokens_to_ids(tokens[i+1])
-        actual_next_token_logit = last_token_logits[actual_next_token_id].item()
-        actual_next_token_prob = probs[actual_next_token_id].item()
-        actual_next_token_log_prob_z_score = (log_probs[actual_next_token_id].item() - log_prob_mean) / log_prob_std
-        actual_next_token_prob_z_score = (probs[actual_next_token_id].item() - prob_mean) / prob_std
-        actual_next_token_logit_z_score = (last_token_logits[actual_next_token_id].item() - logit_mean) / logit_std
-        actual_next_token_rank = (last_token_logits > actual_next_token_logit).sum().item() + 1
-        
-        # Print statistics and predictions
-        current_token = tokens[i]
+    # Assuming each variable is defined as shown
+    # Variables that need to be padded
+    next_tokens = to_padded_numpy_array(next_tokens, len(tokens))
+    next_token_probs = to_padded_numpy_array(next_token_probs, len(tokens))
+    next_token_rank = to_padded_numpy_array(next_token_rank, len(tokens))
+    actual_next_token_logits = to_padded_numpy_array(actual_next_token_logits, len(tokens))
+    actual_next_token_logit_z_scores = to_padded_numpy_array(actual_next_token_logit_z_scores, len(tokens))
+    actual_next_token_probs = to_padded_numpy_array(actual_next_token_probs, len(tokens))
+    actual_next_token_prob_z_scores = to_padded_numpy_array(actual_next_token_prob_z_scores, len(tokens))
+    most_probable_next_token_id = to_padded_numpy_array(most_probable_next_token_id, len(tokens))
+    most_probable_next_token_prob = to_padded_numpy_array(most_probable_next_token_prob, len(tokens))
+    most_probable_next_token = to_padded_numpy_array(most_probable_next_token, len(tokens))
 
-        results.append([i, current_token, actual_next_token, \
-                        logit_mean, logit_std, \
-                        prob_mean, prob_std, log_prob_mean, log_prob_std, \
-                        actual_next_token_logit, actual_next_token_prob, \
-                        actual_next_token_log_prob_z_score, \
-                        actual_next_token_prob_z_score, actual_next_token_logit_z_score, actual_next_token_rank])
-    return results
+    # Variables with length 23
+    input_ids = to_padded_numpy_array(input_ids, len(tokens))
+    logit_mean = to_padded_numpy_array(logit_mean, len(tokens))
+    logit_std = to_padded_numpy_array(logit_std, len(tokens))
+    prob_mean = to_padded_numpy_array(prob_mean, len(tokens))
+    prob_std = to_padded_numpy_array(prob_std, len(tokens))
+
+    variables = [
+        tokens, 
+        input_ids, 
+        tokens[1:]+[None],
+        next_tokens,
+        next_token_probs,
+        next_token_rank,
+        actual_next_token_logits,
+        actual_next_token_logit_z_scores,
+        actual_next_token_probs,
+        actual_next_token_prob_z_scores,
+        most_probable_next_token_id,
+        most_probable_next_token_prob,
+        most_probable_next_token,
+        logit_mean,
+        logit_std,
+        prob_mean,
+        prob_std
+    ]
+    df = pd.DataFrame(variables).T
+
+    df.columns = [
+        "tokens",
+        "input_id",
+        "next_token",
+        "next_input_id",
+        "next_token_probs",
+        "next_token_rank",
+        "actual_next_token_logits",
+        "actual_next_token_logit_z_scores",
+        "actual_next_token_probs",
+        "actual_next_token_prob_z_scores",
+        "most_probable_next_token_id",
+        "most_probable_next_token_prob",
+        "most_probable_next_token",
+        "logit_mean",
+        "logit_std",
+        "prob_mean",
+        "prob_std"]
+
+    df['perplexity'] = calculate_cumulative_perplexity(df['actual_next_token_probs'])
+
+    return df
